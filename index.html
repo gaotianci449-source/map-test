@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>工地影像核对</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+/* 布局：全屏地图 + 顶部图层条 + 底部读数面板（野外单手操作，大按钮、高对比） */
+:root{
+  --bg:#f3f2ec; --panel:#ffffff; --fg:#1c1f1a; --muted:#5f6659; --line:#d9dccf;
+  --accent:#d9480f;   /* 测量桩的红橙 */
+  --gps:#1971c2;      /* 定位蓝 */
+  --ok:#2b8a3e; --warn:#e67700; --bad:#c92a2a;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
+  --sans: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#141612; --panel:#1d201b; --fg:#e8eae2; --muted:#9aa192; --line:#33382f;
+    --accent:#ff7a3d; --gps:#4dabf7; --ok:#51cf66; --warn:#fcc419; --bad:#ff6b6b; color-scheme:dark }
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.45 var(--sans);overflow:hidden;
+  display:flex;flex-direction:column}
+#bar{display:flex;gap:8px;overflow-x:auto;
+  padding:calc(8px + env(safe-area-inset-top,0px)) max(12px,env(safe-area-inset-right,0px)) 8px max(12px,env(safe-area-inset-left,0px));
+  background:var(--panel);border-bottom:1px solid var(--line);flex:none;scrollbar-width:none}
+#bar::-webkit-scrollbar{display:none}
+.chip{flex:none;border:1px solid var(--line);background:var(--bg);color:var(--fg);
+  border-radius:999px;padding:8px 14px;font:inherit;font-size:14px;cursor:pointer;white-space:nowrap}
+.chip[aria-pressed="true"]{background:var(--fg);color:var(--panel);border-color:var(--fg)}
+#map{flex:1;min-height:0;background:#888}
+#panel{flex:none;background:var(--panel);border-top:1px solid var(--line);
+  padding:10px max(12px,env(safe-area-inset-right,0px)) calc(10px + env(safe-area-inset-bottom,0px)) max(12px,env(safe-area-inset-left,0px));
+  display:flex;flex-direction:column;gap:10px;max-height:52vh;overflow-y:auto}
+.read{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:baseline}
+.read dt{color:var(--muted);font-size:12px;letter-spacing:.04em}
+.read dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:15px;word-break:break-all}
+.acc{display:inline-block;padding:1px 8px;border-radius:4px;font-weight:600;color:#fff;background:var(--muted)}
+.acc.ok{background:var(--ok)} .acc.warn{background:var(--warn)} .acc.bad{background:var(--bad)}
+.btns{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+button.b{font:inherit;font-size:14px;padding:12px 6px;border-radius:10px;border:1px solid var(--line);
+  background:var(--bg);color:var(--fg);cursor:pointer}
+button.b.main{background:var(--gps);border-color:var(--gps);color:#fff}
+button.b.hot{background:var(--accent);border-color:var(--accent);color:#fff}
+button.b:focus-visible,.chip:focus-visible{outline:3px solid var(--gps);outline-offset:2px}
+#tip{font-size:13px;color:var(--muted)}
+#tip.on{color:var(--accent);font-weight:600}
+dialog{border:none;border-radius:14px;background:var(--panel);color:var(--fg);width:min(92vw,420px);padding:18px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog h2{margin:0 0 12px;font-size:17px}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+input,select{width:100%;font:inherit;font-family:var(--mono);padding:10px;border-radius:8px;border:1px solid var(--line);
+  background:var(--bg);color:var(--fg)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.dact{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+#log{font-family:var(--mono);font-size:12.5px;white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:10px;
+  max-height:50vh;overflow:auto;margin:0}
+.kp{width:22px;height:22px;margin:-11px 0 0 -11px;position:relative}
+.kp:before,.kp:after{content:"";position:absolute;background:var(--accent)}
+.kp:before{left:10px;top:0;width:2px;height:22px}.kp:after{top:10px;left:0;height:2px;width:22px}
+.kp-lab{background:var(--accent);color:#fff;font-size:11px;padding:1px 5px;border-radius:3px;white-space:nowrap;border:none;box-shadow:none}
+.kp-lab:before{display:none}
+.leaflet-container{font-family:var(--sans)}
+</style>
+</head>
+<body>
+
+<div id="bar" role="group" aria-label="卫星影像来源"></div>
+<div id="map"></div>
+
+<section id="panel">
+  <dl class="read">
+    <dt>精度</dt><dd><span id="acc" class="acc">未定位</span></dd>
+    <dt>经纬度</dt><dd id="ll">—</dd>
+    <dt>UTM</dt><dd id="utm">—</dd>
+    <dt>影像</dt><dd id="lyr" style="font-family:var(--sans)">—</dd>
+  </dl>
+  <div id="tip">先点"开始定位"，站在一个容易认的地物旁边（路口、桥头、房角），看蓝点和影像对不对得上。</div>
+  <div class="btns">
+    <button class="b main" id="bGps">开始定位</button>
+    <button class="b" id="bMark">标记我的位置</button>
+    <button class="b hot" id="bKnown">输入已知点</button>
+    <button class="b" id="bFollow">地图跟随：开</button>
+    <button class="b" id="bLog">查看记录</button>
+    <button class="b" id="bCancel" hidden>取消点选</button>
+  </div>
+</section>
+
+<dialog id="dKnown">
+  <h2>输入已知点坐标</h2>
+  <label for="kName">点名</label>
+  <input id="kName" placeholder="例如 GPS03 或 K12+300 桥头">
+  <label for="kFmt">坐标格式</label>
+  <select id="kFmt">
+    <option value="utm">UTM（东坐标 E / 北坐标 N）</option>
+    <option value="ll">经纬度（十进制度）</option>
+  </select>
+  <div id="kUtm">
+    <div class="row2">
+      <div><label for="kE">E 东坐标（米）</label><input id="kE" inputmode="decimal" placeholder="例如 462345.12"></div>
+      <div><label for="kN">N 北坐标（米）</label><input id="kN" inputmode="decimal" placeholder="例如 1311234.56"></div>
+    </div>
+    <label for="kZone">投影带（几内亚比绍一般为 28N）</label>
+    <input id="kZone" value="28" inputmode="numeric">
+  </div>
+  <div id="kLl" hidden>
+    <div class="row2">
+      <div><label for="kLat">纬度</label><input id="kLat" inputmode="decimal" placeholder="例如 11.8636"></div>
+      <div><label for="kLon">经度（西经为负）</label><input id="kLon" inputmode="decimal" placeholder="例如 -15.5977"></div>
+    </div>
+  </div>
+  <p id="kErr" style="color:var(--bad);font-size:13px;margin:8px 0 0" hidden></p>
+  <div class="dact">
+    <button class="b" id="kNo">取消</button>
+    <button class="b hot" id="kYes">放到地图上</button>
+  </div>
+</dialog>
+
+<dialog id="dLog">
+  <h2>核对记录</h2>
+  <pre id="log">还没有记录。</pre>
+  <div class="dact">
+    <button class="b" id="lClear">清空</button>
+    <button class="b" id="lCopy">复制全部</button>
+    <button class="b main" id="lClose">关闭</button>
+  </div>
+</dialog>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+<script>
+(function(){
+  "use strict";
+  // ---------- 免费影像源（均无需注册） ----------
+  var LAYERS = [
+    { id:"esri", name:"Esri 影像", url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", nz:19,
+      attr:"Imagery © Esri, Maxar, Earthstar Geographics" },
+    { id:"clarity", name:"Esri Clarity（较新）", url:"https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", nz:19,
+      attr:"Imagery © Esri Clarity" },
+    { id:"s2", name:"哨兵2号 10米（参照）", url:"https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg", nz:15,
+      attr:"Sentinel-2 cloudless 2020 by EOX (CC BY 4.0)" },
+    { id:"osm", name:"OSM 道路图", url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png", nz:19,
+      attr:"© OpenStreetMap contributors" }
+  ];
+
+  var map = L.map("map", { zoomControl:false, maxZoom:21 }).setView([11.86, -15.60], 12); // 比绍附近
+  L.control.zoom({ position:"topright" }).addTo(map);
+  L.control.scale({ imperial:false, position:"bottomleft" }).addTo(map);
+
+  var bar = document.getElementById("bar"), cur = null, curLayer = null, chips = {};
+  LAYERS.forEach(function(l){
+    l.layer = L.tileLayer(l.url, { maxNativeZoom:l.nz, maxZoom:21, attribution:l.attr });
+    var c = document.createElement("button");
+    c.className = "chip"; c.textContent = l.name; c.setAttribute("aria-pressed","false");
+    c.onclick = function(){ pick(l); };
+    bar.appendChild(c); chips[l.id] = c;
+  });
+  function pick(l){
+    if (curLayer) map.removeLayer(curLayer);
+    curLayer = l.layer.addTo(map); cur = l;
+    Object.keys(chips).forEach(function(k){ chips[k].setAttribute("aria-pressed", k===l.id ? "true":"false"); });
+    document.getElementById("lyr").textContent = l.name;
+    try { localStorage.setItem("imgtest-layer", l.id); } catch(e){}
+  }
+  var saved = null; try { saved = localStorage.getItem("imgtest-layer"); } catch(e){}
+  pick(LAYERS.filter(function(l){ return l.id===saved; })[0] || LAYERS[0]);
+
+  // ---------- 坐标工具 ----------
+  function zoneOf(lon){ return Math.floor((lon + 180) / 6) + 1; }
+  function utmDef(zone, south){ return "+proj=utm +zone=" + zone + (south ? " +south" : "") + " +datum=WGS84 +units=m +no_defs"; }
+  function toUtm(lat, lon){
+    var z = zoneOf(lon), s = lat < 0, p = proj4("WGS84", utmDef(z, s), [lon, lat]);
+    return { e:p[0], n:p[1], zone:z + (s ? "S" : "N") };
+  }
+  function fromUtm(e, n, zoneStr){
+    var s = /s/i.test(zoneStr), z = parseInt(zoneStr, 10);
+    var p = proj4(utmDef(z, s), "WGS84", [e, n]);
+    return { lat:p[1], lon:p[0] };
+  }
+  function f(n, d){ return Number(n).toFixed(d); }
+  function bearingCn(a, b){
+    var y = Math.sin((b.lng-a.lng)*Math.PI/180)*Math.cos(b.lat*Math.PI/180);
+    var x = Math.cos(a.lat*Math.PI/180)*Math.sin(b.lat*Math.PI/180) - Math.sin(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.cos((b.lng-a.lng)*Math.PI/180);
+    var deg = (Math.atan2(y, x)*180/Math.PI + 360) % 360;
+    var names = ["北","东北","东","东南","南","西南","西","西北"];
+    return names[Math.round(deg/45) % 8] + "（" + f(deg,0) + "°）";
+  }
+
+  // ---------- 定位 ----------
+  var watchId = null, me = null, meDot = null, meCircle = null, follow = true, firstFix = true;
+  var accEl = document.getElementById("acc"), llEl = document.getElementById("ll"), utmEl = document.getElementById("utm");
+  var tip = document.getElementById("tip");
+  function setTip(t, on){ tip.textContent = t; tip.className = on ? "on" : ""; }
+
+  document.getElementById("bGps").onclick = function(){
+    if (watchId !== null){ navigator.geolocation.clearWatch(watchId); watchId = null; this.textContent = "开始定位"; return; }
+    if (!navigator.geolocation){ setTip("这个浏览器不支持定位。请换用手机自带浏览器或 Chrome。", true); return; }
+    this.textContent = "停止定位"; accEl.textContent = "搜星中…"; accEl.className = "acc";
+    watchId = navigator.geolocation.watchPosition(onPos, function(err){
+      var m = err.code === 1 ? "定位权限被拒绝。请在浏览器设置里允许本网站使用位置。" :
+              err.code === 3 ? "定位超时。到开阔处再试，或稍等一会儿。" : "暂时拿不到位置：" + err.message;
+      setTip(m, true); accEl.textContent = "失败"; accEl.className = "acc bad";
+    }, { enableHighAccuracy:true, maximumAge:0, timeout:30000 });
+  };
+  function onPos(p){
+    var c = p.coords; me = { lat:c.latitude, lng:c.longitude, acc:c.accuracy, t:new Date(p.timestamp) };
+    var ll = [me.lat, me.lng];
+    if (!meDot){
+      meCircle = L.circle(ll, { radius:me.acc, color:"#1971c2", weight:1, fillOpacity:.12 }).addTo(map);
+      meDot = L.circleMarker(ll, { radius:7, color:"#fff", weight:2, fillColor:"#1971c2", fillOpacity:1 }).addTo(map);
+    } else { meDot.setLatLng(ll); meCircle.setLatLng(ll).setRadius(me.acc); }
+    accEl.textContent = "±" + f(me.acc, 1) + " 米";
+    accEl.className = "acc " + (me.acc <= 3 ? "ok" : me.acc <= 8 ? "warn" : "bad");
+    llEl.textContent = f(me.lat, 7) + ", " + f(me.lng, 7);
+    var u = toUtm(me.lat, me.lng);
+    utmEl.textContent = "E " + f(u.e, 2) + "  N " + f(u.n, 2) + "  " + u.zone;
+    if (firstFix){ map.setView(ll, 19); firstFix = false; setTip("蓝点是手机定位，浅蓝圈是误差范围。精度变绿（3 米以内）再判断更可靠。"); }
+    else if (follow) map.panTo(ll, { animate:false });
+  }
+  document.getElementById("bFollow").onclick = function(){
+    follow = !follow; this.textContent = "地图跟随：" + (follow ? "开" : "关");
+  };
+  map.on("dragstart", function(){ if (follow){ follow = false; document.getElementById("bFollow").textContent = "地图跟随：关"; } });
+
+  // ---------- 记录 ----------
+  var LOG = [];
+  try { LOG = JSON.parse(localStorage.getItem("imgtest-log") || "[]"); } catch(e){ LOG = []; }
+  function save(){ try { localStorage.setItem("imgtest-log", JSON.stringify(LOG)); } catch(e){} }
+  function stamp(){ var d = new Date(); return d.getFullYear()+"-"+("0"+(d.getMonth()+1)).slice(-2)+"-"+("0"+d.getDate()).slice(-2)+" "+d.toTimeString().slice(0,5); }
+
+  // 标记我的位置 → 再点出影像上该地物的位置，算出偏差
+  var mode = null, pending = null, cancelBtn = document.getElementById("bCancel");
+  function startPick(kind, from, label){
+    mode = kind; pending = { from:from, label:label };
+    cancelBtn.hidden = false;
+    setTip("现在在影像上点一下：这个点在影像上【实际】应该在的位置（比如路口中心、房角）。", true);
+  }
+  cancelBtn.onclick = function(){ mode = null; pending = null; cancelBtn.hidden = true; setTip("已取消。"); };
+
+  document.getElementById("bMark").onclick = function(){
+    if (!me){ setTip("还没有定位。先点“开始定位”。", true); return; }
+    var from = L.latLng(me.lat, me.lng);
+    L.circleMarker(from, { radius:5, color:"#1971c2", fillColor:"#1971c2", fillOpacity:1 }).addTo(map);
+    startPick("gps", from, "我站的位置（GPS ±" + f(me.acc,1) + "m）");
+    pending.acc = me.acc;
+  };
+
+  map.on("click", function(e){
+    if (!mode) return;
+    var a = pending.from, b = e.latlng, d = map.distance(a, b);
+    L.polyline([a, b], { color:"#d9480f", weight:2, dashArray:"5 5" }).addTo(map);
+    L.circleMarker(b, { radius:5, color:"#d9480f", fillColor:"#d9480f", fillOpacity:1 }).addTo(map)
+      .bindTooltip("偏 " + f(d,1) + " m", { permanent:true, direction:"right" }).openTooltip();
+    var line = stamp() + " | " + cur.name + " | " + pending.label + " | 影像偏差 " + f(d,1) + " m，影像位置在其" + bearingCn(a, b);
+    LOG.push(line); save();
+    var judge = d <= 2 ? "很好，影像基本对齐。" : d <= 5 ? "可以接受，看图找位置够用。" : "偏差较大，这个影像源在这里不太可靠。";
+    setTip("偏差 " + f(d,1) + " 米。" + judge + (mode === "gps" && pending.acc > d ? "（注意：这次 GPS 误差 ±" + f(pending.acc,1) + "m 比偏差还大，结论不可靠）" : ""), true);
+    mode = null; pending = null; cancelBtn.hidden = true;
+  });
+
+  // 已知点
+  var dK = document.getElementById("dKnown"), kFmt = document.getElementById("kFmt"), kErr = document.getElementById("kErr");
+  kFmt.onchange = function(){ var u = kFmt.value === "utm"; document.getElementById("kUtm").hidden = !u; document.getElementById("kLl").hidden = u; };
+  document.getElementById("bKnown").onclick = function(){ kErr.hidden = true; dK.showModal(); };
+  document.getElementById("kNo").onclick = function(){ dK.close(); };
+  document.getElementById("kYes").onclick = function(){
+    var name = document.getElementById("kName").value.trim() || "已知点";
+    var lat, lon;
+    try {
+      if (kFmt.value === "utm"){
+        var e = parseFloat(document.getElementById("kE").value), n = parseFloat(document.getElementById("kN").value);
+        var z = document.getElementById("kZone").value.trim() || "28";
+        if (!(e > 100000 && e < 900000)) throw "E 东坐标一般是 6 位整数（10万～90万米之间），请检查。";
+        if (!(n > 0 && n < 10000000)) throw "N 北坐标填写有误，请检查。";
+        var r = fromUtm(e, n, z); lat = r.lat; lon = r.lon;
+      } else {
+        lat = parseFloat(document.getElementById("kLat").value); lon = parseFloat(document.getElementById("kLon").value);
+        if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) throw "经纬度填写有误。几内亚比绍大约是纬度 11～12.7，经度 -16.7～-13.6。";
+      }
+    } catch(msg){ kErr.textContent = String(msg); kErr.hidden = false; return; }
+    dK.close();
+    var p = L.latLng(lat, lon);
+    L.marker(p, { icon:L.divIcon({ className:"", html:'<div class="kp"></div>', iconSize:[0,0] }) }).addTo(map)
+      .bindTooltip(name, { permanent:true, direction:"top", className:"kp-lab", offset:[0,-12] });
+    follow = false; document.getElementById("bFollow").textContent = "地图跟随：关";
+    map.setView(p, 19);
+    var extra = me ? "；离你现在 " + f(map.distance(p, L.latLng(me.lat, me.lng)), 1) + " m" : "";
+    startPick("known", p, "已知点 " + name);
+    setTip("红十字是“" + name + "”按坐标算出的位置" + extra + "。现在点一下影像上这个点【实际】的位置。", true);
+  };
+
+  // 记录面板
+  var dL = document.getElementById("dLog"), logEl = document.getElementById("log");
+  document.getElementById("bLog").onclick = function(){ logEl.textContent = LOG.length ? LOG.join("\n") : "还没有记录。"; dL.showModal(); };
+  document.getElementById("lClose").onclick = function(){ dL.close(); };
+  document.getElementById("lClear").onclick = function(){
+    if (this.dataset.sure){ LOG = []; save(); logEl.textContent = "已清空。"; this.textContent = "清空"; delete this.dataset.sure; }
+    else { this.dataset.sure = "1"; this.textContent = "再点一次确认"; }
+  };
+  document.getElementById("lCopy").onclick = function(){
+    var t = LOG.join("\n"), btn = this;
+    if (navigator.clipboard) navigator.clipboard.writeText(t).then(function(){ btn.textContent = "已复制"; }, sel); else sel();
+    function sel(){ var r = document.createRange(); r.selectNodeContents(logEl); var s = getSelection(); s.removeAllRanges(); s.addRange(r); btn.textContent = "已选中，长按复制"; }
+  };
+})();
+</script>
+</body>
+</html>
