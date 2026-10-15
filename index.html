@@ -76,6 +76,7 @@ input,select{width:100%;font:inherit;font-family:var(--mono);padding:10px;border
     <dt>经纬度</dt><dd id="ll">—</dd>
     <dt>UTM</dt><dd id="utm">—</dd>
     <dt>影像</dt><dd id="lyr" style="font-family:var(--sans)">—</dd>
+    <dt>级别</dt><dd id="zl">—</dd>
   </dl>
   <div id="tip">先点"开始定位"，站在一个容易认的地物旁边（路口、桥头、房角），看蓝点和影像对不对得上。</div>
   <div class="btns">
@@ -135,19 +136,23 @@ input,select{width:100%;font:inherit;font-family:var(--mono);padding:10px;border
   "use strict";
   // ---------- 免费影像源（均无需注册） ----------
   var LAYERS = [
-    { id:"esri", name:"Esri 影像", url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", nz:19,
+    { id:"esri", name:"Esri 影像（2025）", url:"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", nz:17,
       attr:"Imagery © Esri, Maxar, Earthstar Geographics" },
-    { id:"clarity", name:"Esri Clarity（较新）", url:"https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", nz:19,
-      attr:"Imagery © Esri Clarity" },
     { id:"s2", name:"哨兵2号 10米（参照）", url:"https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg", nz:15,
       attr:"Sentinel-2 cloudless 2020 by EOX (CC BY 4.0)" },
     { id:"osm", name:"OSM 道路图", url:"https://tile.openstreetmap.org/{z}/{x}/{y}.png", nz:19,
       attr:"© OpenStreetMap contributors" }
   ];
 
-  var map = L.map("map", { zoomControl:false, maxZoom:21 }).setView([11.86, -15.60], 12); // 比绍附近
+  var map = L.map("map", { zoomControl:false, maxZoom:21 }).setView([10.9465, -14.3027], 17); // 营地
   L.control.zoom({ position:"topright" }).addTo(map);
   L.control.scale({ imperial:false, position:"bottomleft" }).addTo(map);
+  function showZoom(){
+    var z = map.getZoom(), el = document.getElementById("zl");
+    var nz = (cur && cur.nz) || 19;
+    el.textContent = z.toFixed(1) + (z > nz ? "（影像只到 " + nz + " 级，超过部分为拉伸）" : "");
+  }
+  map.on("zoomend", showZoom);
 
   var bar = document.getElementById("bar"), cur = null, curLayer = null, chips = {};
   LAYERS.forEach(function(l){
@@ -163,6 +168,7 @@ input,select{width:100%;font:inherit;font-family:var(--mono);padding:10px;border
     Object.keys(chips).forEach(function(k){ chips[k].setAttribute("aria-pressed", k===l.id ? "true":"false"); });
     document.getElementById("lyr").textContent = l.name;
     try { localStorage.setItem("imgtest-layer", l.id); } catch(e){}
+    showZoom();
   }
   var saved = null; try { saved = localStorage.getItem("imgtest-layer"); } catch(e){}
   pick(LAYERS.filter(function(l){ return l.id===saved; })[0] || LAYERS[0]);
